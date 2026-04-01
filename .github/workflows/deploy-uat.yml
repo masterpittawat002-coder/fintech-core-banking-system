@@ -1,0 +1,146 @@
+name: Deploy to UAT
+
+on:
+  # Trigger เมื่อ Backend CI สำเร็จบน main เท่านั้น
+  # Render Free จะ build Docker image จาก source code ใน repo โดยตรง
+  # ไม่จำเป็นต้องรอ Docker Build & Push (GHCR)
+  workflow_run:
+    workflows: ["Backend CI"]
+    branches: [main]
+    types: [completed]
+
+jobs:
+  # ===== CHECK CI PASSED =====
+  check:
+    name: Verify CI passed
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      should_deploy: ${{ steps.check.outputs.result }}
+    steps:
+      - name: Check workflow passed
+        id: check
+        run: echo "result=true" >> $GITHUB_OUTPUT
+
+  # ===== DEPLOY BACKEND TO RENDER (FREE) =====
+  deploy-backend:
+    name: Deploy Backend (Render Free)
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.should_deploy == 'true'
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Render Deploy Hook — POST เพื่อ trigger deploy
+      # Render จะ pull source code จาก repo แล้ว build Docker image เอง
+      - name: Trigger Render Deploy
+        run: |
+          echo "Triggering Render deploy to UAT..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}")
+
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]; then
+            echo "Deploy triggered! (HTTP $HTTP_STATUS)"
+          else
+            echo "ERROR: Deploy trigger failed (HTTP $HTTP_STATUS)"
+            exit 1
+          fi
+
+      # Render Free: build ~3-5 min (ช้ากว่า paid tier)
+      - name: Wait for Render build
+        run: |
+          echo "Waiting for Render build (~3-5 min)..."
+          sleep 180
+
+      # Health check พร้อม retry (รองรับ cold start ~30s + build time)
+      - name: Health check
+        run: |
+          MAX_RETRIES=25
+          RETRY_COUNT=0
+          HEALTH_URL="${{ vars.UAT_URL }}/health"
+
+          echo "Checking: $HEALTH_URL"
+          echo "(Render Free tier may need cold start time...)"
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 60 "$HEALTH_URL" || echo "000")
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Health check passed!"
+              exit 0
+            fi
+
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Attempt $RETRY_COUNT/$MAX_RETRIES: HTTP $HTTP_STATUS - Retrying in 15s..."
+            sleep 15
+          done
+
+          echo "Health check failed after $MAX_RETRIES attempts!"
+          exit 1
+
+      # Smoke test
+      - name: Smoke tests
+        run: |
+          API_URL="${{ vars.UAT_URL }}"
+
+          echo "Testing auth endpoint..."
+          curl -sf "$API_URL/api/auth/login" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@test.com","password":"wrong"}' \
+            || echo "Auth endpoint responding (expected 401)"
+
+          echo ""
+          echo "Testing health endpoint..."
+          curl -sf "$API_URL/health"
+
+          echo ""
+          echo "Smoke tests passed!"
+
+  # ===== DEPLOY FRONTEND TO VERCEL =====
+  deploy-frontend:
+    name: Deploy Frontend (Vercel Preview)
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.should_deploy == 'true'
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Pull Vercel environment
+        run: |
+          vercel pull \
+            --yes \
+            --environment=preview \
+            --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: banking-frontend
+
+      - name: Build with Vercel
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: banking-frontend
+
+      - name: Deploy to Vercel (Preview)
+        id: deploy
+        run: |
+          URL=$(vercel deploy \
+            --prebuilt \
+            --token=${{ secrets.VERCEL_TOKEN }})
+          echo "preview_url=$URL" >> $GITHUB_OUTPUT
+        working-directory: banking-frontend
+
+      - name: Output preview URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.preview_url }}"

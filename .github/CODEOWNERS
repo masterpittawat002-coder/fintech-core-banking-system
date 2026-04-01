@@ -1,0 +1,11 @@
+# Default owners for the entire repo
+* @masterpittawat002-coder
+
+# Backend
+/BankingSystem/ @masterpittawat002-coder
+
+# Frontend
+/banking-frontend/ @masterpittawat002-coder
+
+# CI/CD
+/.github/ @masterpittawat002-coder

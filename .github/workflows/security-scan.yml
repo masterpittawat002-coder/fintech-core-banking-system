@@ -1,0 +1,75 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * 1" # Every Monday 02:00 UTC (= 09:00 ICT/UTC+7)
+
+jobs:
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      matrix:
+        language: ["csharp", "javascript"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+      - name: Setup .NET SDK
+        if: matrix.language == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ vars.DOTNET_VERSION || '10.0.x' }}
+      - name: Build .NET
+        if: matrix.language == 'csharp'
+        run: dotnet build BankingSystem/BankingSystem.slnx
+      - uses: github/codeql-action/analyze@v3
+
+  dependency-audit:
+    name: Dependency Vulnerability Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ vars.DOTNET_VERSION || '10.0.x' }}
+      - name: Audit NuGet packages
+        run: |
+          dotnet restore BankingSystem/BankingSystem.slnx
+          dotnet list BankingSystem/BankingSystem.slnx package --vulnerable --include-transitive 2>&1 | tee nuget-audit.txt
+          if grep -q "has the following vulnerable packages" nuget-audit.txt; then
+            echo "WARNING: Vulnerable NuGet packages found!"
+          else
+            echo "No vulnerable NuGet packages found."
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Audit npm packages
+        working-directory: banking-frontend
+        run: |
+          npm ci
+          npm audit --audit-level=high || echo "npm audit found issues"
+
+  secret-scan:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
