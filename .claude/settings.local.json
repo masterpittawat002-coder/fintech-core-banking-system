@@ -45,7 +45,11 @@
       "Bash(git remote:*)",
       "Bash(git push:*)",
       "Bash(where gh:*)",
-      "Bash(gh repo:*)"
+      "Bash(gh repo:*)",
+      "Bash(ls -la /d/Development/fintech-core-banking-system/BankingSystem/*.sln*)",
+      "Bash(gh secret:*)",
+      "Bash(gh variable:*)",
+      "Bash(gh api:*)"
     ]
   }
 }
